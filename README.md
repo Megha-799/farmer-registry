@@ -203,10 +203,48 @@ ODK field collection connects to the Farmer Registry via two supported integrati
    * **URL**: `https://farmer-registry.yourdomain.org/api/v1/farmer-registry/odk/webhook`
 3. Whenever an enumerator submits a finalized form from an Android tablet, ODK Central directly fires an HTTPS POST to OpenG2P, which validates, transforms, and ingests the record automatically into the registry.
 
-#### Pattern B: Scheduled Pull / Kubernetes CronJob
-To run periodic batch synchronization from ODK Central:
-1. Package `odk/sync_from_central.py` into a Kubernetes `CronJob` running periodically (e.g., `*/15 * * * *` for every 15 minutes).
-2. The script polls ODK Central via OData (`/v1/projects/{id}/forms/{id}.svc/Submissions`), expands repeat groups, and pushes to the Partner API (`/partner/ingest_data`).
+#### Pattern B: Automated Scheduled Pull via OpenG2P Connector Service
+To run periodic batch synchronization from ODK Central with automatic schema mapping and zero custom scripts:
+
+1. **Deploy OpenG2P Connector Service & Worker**:
+   The Connector Service (`openg2p-connector-service`) and Worker poll ODK Central via OData, automatically expand repeat groups (land parcels, crops, livestock), wrap payloads in the standard OpenG2P envelope, and forward them to the Partner API (`/partner/ingest_data`).
+
+   ```yaml
+   # Docker Compose / Kubernetes deployment
+   connector-api:
+     image: openg2p/openg2p-connector-service:latest
+     environment:
+       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/connector
+     ports:
+       - "8050:8000"
+
+   connector-worker:
+     image: openg2p/openg2p-connector-service:latest
+     command: ["celery", "-A", "app.celery_app", "worker", "--beat", "-l", "info"]
+     environment:
+       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/connector
+
+   connector-ui:
+     image: openg2p/openg2p-connector-ui:latest
+     ports:
+       - "5173:80"
+   ```
+
+2. **Seed the Pipeline Definition (`odk/seed_connector_pipelines.sql`)**:
+   Run the seed script against the `connector` PostgreSQL database:
+   ```bash
+   # Seed the ODK Central polling pipeline
+   docker exec -i farmer-registry-postgres psql -U postgres -d connector -f odk/seed_connector_pipelines.sql
+   ```
+   This registers the pipeline `farmer-odk-pipeline-01`:
+   * **Source**: ODK Central OData endpoint (`resolve_nav_links: true` for automatic nested repeat expansion).
+   * **Target**: `http://farmer-registry-partner-api:8000/partner/ingest_data` with header `partner-id: farmer-partner`.
+   * **Authentication**: Authenticated session against ODK Central (`odk_session`).
+
+3. **Monitor via Connector UI**:
+   Open `http://localhost:5173` (or your ingress URL) to inspect pipeline execution logs, status, and trigger manual syncs via the "Poll Now" action.
+
+For full technical specifications and field mappings, see [`odk/ODK_CONNECTOR_SERVICE_SETUP_GUIDE.md`](odk/ODK_CONNECTOR_SERVICE_SETUP_GUIDE.md).
 
 ---
 
